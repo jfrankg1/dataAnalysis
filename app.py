@@ -16,7 +16,7 @@ def main():
     # API key input (with warning about security)
     with st.expander("Claude API Configuration"):
         st.warning("Note: For production use, you should use environment variables or secure methods to store API keys.")
-        api_key = st.text_input("Enter your Anthropic API Key", type="password")
+        api_key = st.secrets["anthropic"]["api_key"]
     
     # File uploader for multiple CSV files
     uploaded_files = st.file_uploader("Upload CSV file(s)", type="csv", accept_multiple_files=True)
