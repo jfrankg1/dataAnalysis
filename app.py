@@ -183,13 +183,13 @@ def identify_data_labels(df, api_key):
 
     Return your analysis in this JSON format:
     ```
-    {
+    {{
       "has_row_labels": true/false,
       "has_column_labels": true/false,
       "labels": [list of identified labels],
       "confidence": "high/medium/low",
       "reasoning": "your explanation"
-    }
+    }}
     ```
 
     Please ensure your response is valid, parseable JSON.
