@@ -8,6 +8,7 @@ import base64
 import json
 import re
 from typing import List, Dict, Tuple, Optional, Any
+import tiktoken
 
 # Page configuration
 st.set_page_config(
@@ -92,25 +93,16 @@ def main():
                     # Save intermediate file for user reference
                     intermediate_files.append((f"transposed_{file.name}", df))
             
-            # Step 5: Review sample characteristics
-            with st.spinner(f"Analyzing sample characteristics in {file.name}..."):
-                column_types = categorize_columns(df, api_key)
-                
-                # Display column categorization
-                st.write("Column categorization:")
-                category_counts = {}
-                for col, category in column_types.items():
-                    if category in category_counts:
-                        category_counts[category] += 1
-                    else:
-                        category_counts[category] = 1
-                
-                for category, count in category_counts.items():
-                    st.write(f"- {category}: {count} columns")
+            # Step 5: Review sample of data to glean additional information
+            with st.spinner(f"Analyzing data samples in {file.name}..."):
+                data_insights = analyze_data_sample(df, api_key)
+                if data_insights:
+                    with st.expander("Data insights"):
+                        st.write(data_insights)
             
             # Step 6: Identify and validate controls
             with st.spinner(f"Identifying controls in {file.name}..."):
-                controls, control_stats = identify_and_validate_controls(df, column_types, api_key)
+                controls, control_stats = identify_and_validate_controls(df, api_key)
                 
                 if not controls or not controls.get("positive_controls") or not controls.get("negative_controls"):
                     st.warning(f"Could not identify sufficient controls in {file.name}. Normalization may be limited.")
@@ -132,7 +124,6 @@ def main():
             with st.spinner(f"Normalizing data in {file.name}..."):
                 normalized_df = normalize_data(df, norm_method, controls, control_stats)
                 processed_files.append((file.name, normalized_df, {
-                    "column_types": column_types,
                     "controls": controls,
                     "control_stats": control_stats
                 }))
@@ -218,9 +209,11 @@ def analyze_file_structure(file, api_key) -> Tuple[pd.DataFrame, bool, bool]:
     
     # If we have API key, ask Claude to make a judgment call
     if api_key:
-        # Calculate token count for first row and column content
-        row_tokens = len(str(first_row).split())
-        col_tokens = len(str(first_col).split())
+        # Estimate token count for first row and column content
+        row_string = str(first_row)
+        col_string = str(first_col)
+        row_tokens = len(row_string.split())
+        col_tokens = len(col_string.split())
         
         if row_tokens > 1000 or col_tokens > 1000:
             st.warning("Data sample is large and may exceed token limits for AI analysis.")
@@ -300,82 +293,52 @@ def analyze_file_structure(file, api_key) -> Tuple[pd.DataFrame, bool, bool]:
     else:
         return df, True, False
 
-def categorize_columns(df, api_key):
+def analyze_data_sample(df, api_key):
     """
-    Categorize columns as sample characteristics or data outputs.
+    Review a sample of the data to glean additional information.
+    Returns insights as text.
     """
-    column_types = {}
+    if not api_key:
+        return None
     
-    # Default categorization with simple heuristics
-    for col in df.columns:
-        col_lower = str(col).lower()
-        # Identify likely characteristic columns
-        if any(term in col_lower for term in ['id', 'sample', 'name', 'type', 'time', 'date', 'group']):
-            column_types[col] = 'sample_characteristic'
-        # Identify likely control indicator columns
-        elif 'control' in col_lower:
-            column_types[col] = 'control_indicator'
-        # Identify likely measurement columns
-        elif df[col].dtype in [np.float64, np.int64]:
-            column_types[col] = 'data_output'
-        else:
-            column_types[col] = 'unknown'
-    
-    # If API key is available, use Claude to refine categorization
-    if api_key:
-        try:
-            # Create sample of data to send to Claude
-            sample_data = df.head(10).to_string()
-            column_info = "\n".join([f"{col} - Data type: {df[col].dtype}" for col in df.columns])
-            
-            client = anthropic.Anthropic(api_key=api_key)
-            prompt = f"""
-            I have an experimental assay dataset. Please help me categorize each column.
-            
-            Column information:
-            {column_info}
-            
-            Sample data:
-            {sample_data}
-            
-            Please categorize each column into one of these types:
-            1. "sample_characteristic" - Identifies or describes the sample (e.g., IDs, names, dates, conditions)
-            2. "data_output" - Experimental measurements and result values
-            3. "control_indicator" - Indicates if the sample is a control or what type of control
-            
-            Return your answer as a JSON, where keys are column names and values are the category.
-            
-            Example:
-            {{"Sample_ID": "sample_characteristic", "ATP_Level": "data_output", "Sample_Type": "control_indicator"}}
-            """
-            
-            message = client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=1000,
-                temperature=0,
-                system="You are a data scientist specializing in experimental biology data. Respond with JSON only.",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            response = message.content[0].text
-            
-            # Try to extract JSON from the response
-            try:
-                json_match = re.search(r'\{.*\}', response.replace('\n', ''), re.DOTALL)
-                if json_match:
-                    ai_column_types = json.loads(json_match.group(0))
-                    column_types.update(ai_column_types)
-            except Exception as json_err:
-                st.warning(f"Could not parse AI column categorization: {str(json_err)}")
-                
-        except Exception as e:
-            st.warning(f"Could not use AI for column categorization: {str(e)}")
-    
-    return column_types
+    try:
+        # Create a sample of the data
+        data_sample = df.head(10).to_string()
+        
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = f"""
+        I have a sample of experimental assay data. Please analyze this sample and provide insights 
+        about the data structure, potential patterns, or any information that might be relevant for analysis.
+        
+        Sample data:
+        {data_sample}
+        
+        Please provide brief insights about:
+        1. The apparent type of assay or experiment
+        2. Key variables or measurements present
+        3. Any patterns or anomalies in the data
+        4. Any other relevant observations
+        
+        Keep your response brief and focused on information that would help with data normalization.
+        """
+        
+        message = client.messages.create(
+            model="claude-3-7-sonnet-20250219",
+            max_tokens=500,
+            temperature=0,
+            system="You are a data scientist specializing in experimental biology.",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        return message.content[0].text
+        
+    except Exception as e:
+        st.warning(f"Could not get data insights: {str(e)}")
+        return None
 
-def identify_and_validate_controls(df, column_types, api_key):
+def identify_and_validate_controls(df, api_key):
     """
     Identify positive and negative controls in the dataset and validate their quality.
     """
@@ -389,12 +352,17 @@ def identify_and_validate_controls(df, column_types, api_key):
         "negative": {}
     }
     
-    # Look for control_indicator columns
-    control_cols = [col for col, cat in column_types.items() if cat == 'control_indicator']
-    
     # Simple heuristic approach first
-    if control_cols:
-        for col in control_cols:
+    # Look for columns that might indicate control type
+    control_indicators = []
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if 'type' in col_lower or 'control' in col_lower or 'sample' in col_lower:
+            control_indicators.append(col)
+    
+    # Try to find controls based on these columns
+    if control_indicators:
+        for col in control_indicators:
             # Look for positive controls
             pos_mask = df[col].astype(str).str.lower().str.contains('positive|pos|pos_control|high')
             if pos_mask.any():
@@ -405,16 +373,19 @@ def identify_and_validate_controls(df, column_types, api_key):
             if neg_mask.any():
                 controls["negative_controls"] = df.loc[neg_mask].index.tolist()
     
-    # If we didn't find controls, look in sample IDs
+    # If we didn't find controls, look in any columns that might contain identifiers
     if not controls["positive_controls"] and not controls["negative_controls"]:
-        id_cols = [col for col, cat in column_types.items() if cat == 'sample_characteristic']
-        for col in id_cols:
-            # Look for positive controls in IDs
+        for col in df.columns:
+            # Skip numeric columns
+            if df[col].dtype in [np.float64, np.int64]:
+                continue
+                
+            # Look for positive controls in non-numeric columns
             pos_mask = df[col].astype(str).str.lower().str.contains('positive|pos|pos_control|high')
             if pos_mask.any():
                 controls["positive_controls"] = df.loc[pos_mask].index.tolist()
             
-            # Look for negative controls in IDs
+            # Look for negative controls in non-numeric columns
             neg_mask = df[col].astype(str).str.lower().str.contains('negative|neg|neg_control|low|blank')
             if neg_mask.any():
                 controls["negative_controls"] = df.loc[neg_mask].index.tolist()
@@ -423,14 +394,14 @@ def identify_and_validate_controls(df, column_types, api_key):
     if api_key and (not controls["positive_controls"] or not controls["negative_controls"]):
         try:
             # Create sample of data to send to Claude
-            sample_data = df.to_string(max_rows=50)
+            data_sample = df.to_string(max_rows=50)
             
             client = anthropic.Anthropic(api_key=api_key)
             prompt = f"""
             I have an experimental assay dataset that should include positive and negative controls.
             
             Here's the data:
-            {sample_data}
+            {data_sample}
             
             Please help me identify:
             1. Which rows are positive controls?
@@ -478,10 +449,10 @@ def identify_and_validate_controls(df, column_types, api_key):
             st.warning(f"Could not use AI for control identification: {str(e)}")
     
     # Now validate controls and calculate statistics
-    data_cols = [col for col, cat in column_types.items() if cat == 'data_output']
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     
     # Function to safely extract controls and calculate stats
-    def calculate_control_stats(control_list, df, data_cols):
+    def calculate_control_stats(control_list, df, numeric_cols):
         stats = {}
         
         # Try to extract the control rows
@@ -499,21 +470,19 @@ def identify_and_validate_controls(df, column_types, api_key):
                 try:
                     control_df = df.loc[control_list]
                 except:
-                    # Try to match against a sample ID column
-                    id_cols = [col for col, cat in column_types.items() 
-                               if cat == 'sample_characteristic']
-                    
-                    for id_col in id_cols:
-                        matched_rows = df[df[id_col].isin(control_list)]
-                        if not matched_rows.empty:
-                            control_df = matched_rows
-                            break
+                    # Try to match against ID-like columns
+                    for col in df.columns:
+                        if df[col].dtype not in [np.float64, np.int64]:  # Skip numeric columns
+                            matched_rows = df[df[col].isin(control_list)]
+                            if not matched_rows.empty:
+                                control_df = matched_rows
+                                break
                     else:
                         # No matches found
                         return stats
             
-            # Calculate statistics for each data column
-            for col in data_cols:
+            # Calculate statistics for each numeric column
+            for col in numeric_cols:
                 try:
                     values = control_df[col].astype(float)
                     mean = values.mean()
@@ -536,8 +505,8 @@ def identify_and_validate_controls(df, column_types, api_key):
         return stats
     
     # Calculate statistics for positive and negative controls
-    control_stats["positive"] = calculate_control_stats(controls["positive_controls"], df, data_cols)
-    control_stats["negative"] = calculate_control_stats(controls["negative_controls"], df, data_cols)
+    control_stats["positive"] = calculate_control_stats(controls["positive_controls"], df, numeric_cols)
+    control_stats["negative"] = calculate_control_stats(controls["negative_controls"], df, numeric_cols)
     
     # Validate controls
     valid_controls = True
@@ -548,7 +517,7 @@ def identify_and_validate_controls(df, column_types, api_key):
         valid_controls = False
     
     # Check CV values for each measurement
-    for col in data_cols:
+    for col in numeric_cols:
         if col in control_stats["positive"] and col in control_stats["negative"]:
             pos_cv = control_stats["positive"][col].get("cv", float('inf'))
             neg_cv = control_stats["negative"][col].get("cv", float('inf'))
@@ -660,21 +629,13 @@ def combine_samples_across_files(processed_files):
     # Find candidate ID columns in each file
     id_columns = {}
     
-    for idx, (filename, df, metadata) in enumerate(processed_files):
-        # Try to find ID column from metadata
-        column_types = metadata.get("column_types", {})
-        id_cols = [col for col, cat in column_types.items() 
-                  if cat == 'sample_characteristic' and 
-                  any(term in str(col).lower() for term in ['id', 'sample', 'name'])]
-        
-        if id_cols:
-            id_columns[idx] = id_cols[0]  # Use the first identified ID column
-        else:
-            # Fallback: look for columns with 'id' or 'sample' in the name
-            for col in df.columns:
-                if 'id' in str(col).lower() or 'sample' in str(col).lower():
-                    id_columns[idx] = col
-                    break
+    for idx, (filename, df, _) in enumerate(processed_files):
+        # Try to find ID column using heuristics
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if 'id' in col_lower or 'sample' in col_lower:
+                id_columns[idx] = col
+                break
     
     # If we couldn't find ID columns for all files, return None
     if len(id_columns) != len(processed_files):
