@@ -1041,8 +1041,8 @@ def analyze_samples_across_files(file_info, label_analysis, api_key):
         {{
           "group_id": 1,
           "samples": [
-            {{"file": "file1.csv", "identifiers": {{"column1": "value1", "column2": "value2"}}},
-            {{"file": "file2.csv", "identifiers": {{"column1": "value1", "column2": "value2"}}}
+            {{"file": "file1.csv", "identifiers": {{"column1": "value1", "column2": "value2"}}}},
+            {{"file": "file2.csv", "identifiers": {{"column1": "value1", "column2": "value2"}}}}
           ]
         }},
         ...
