@@ -792,25 +792,6 @@ def process_files_collectively(intermediate_dfs, norm_method, api_key):
     file_info = []
     for file_name, df, labels, categories in intermediate_dfs:
         # Get sample characteristic columns
-        char_cols = [col for col, category in categories.items()
-
-
-def process_files_collectively(intermediate_dfs, norm_method, api_key):
-    """Process multiple files collectively to unify labels and merge related data"""
-    if not intermediate_dfs or len(intermediate_dfs) < 2:
-        return {
-            "status": "success",
-            "message": "Only one file processed, no collective analysis needed.",
-            "merged_files": False,
-            "output_dfs": []
-        }
-    
-    st.write("### Analyzing files collectively")
-    
-    # Extract file info
-    file_info = []
-    for file_name, df, labels, categories in intermediate_dfs:
-        # Get sample characteristic columns
         char_cols = [col for col, category in categories.items() 
                     if category == "Sample Characteristic" and col in df.columns]
         
