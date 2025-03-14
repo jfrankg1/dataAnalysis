@@ -2,24 +2,27 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import anthropic
+import json
+import re
 import os
 from io import StringIO
 import base64
-import json
-import re
-from typing import List, Dict, Tuple, Optional, Any
-import tiktoken
+from typing import Dict, List, Tuple, Any, Optional
 
 # Page configuration
 st.set_page_config(
-    page_title="Experimental Assay Data Processor", 
+    page_title="Experimental Assay Data Processor",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# Initialize session state for storing processed data
+if 'processed_files' not in st.session_state:
+    st.session_state.processed_files = {}
+
 def main():
     st.title("Experimental Assay Data Processor")
-    st.write("Upload your experimental assay data files, select normalization method, and get AI-assisted analysis.")
+    st.write("Upload your experimental assay data files for AI-assisted analysis.")
     
     # API key configuration
     with st.sidebar:
@@ -35,7 +38,7 @@ def main():
                 api_key = st.secrets["anthropic"]["api_key"]
                 st.success("API key loaded from secrets")
             except Exception as e:
-                st.error("Failed to load API key from secrets")
+                st.error(f"Failed to load API key from secrets: {e}")
                 api_key = None
         else:
             api_key = st.text_input("Enter Claude API Key", type="password")
@@ -59,655 +62,497 @@ def main():
     for idx, file in enumerate(uploaded_files):
         st.write(f"{idx+1}. {file.name}")
     
-    # Normalization method selection
-    norm_method = st.selectbox(
-        "Select normalization method:",
-        ["None", "Z-score", "Percent activity"],
-        help="Z-score normalizes data to have mean 0 and standard deviation 1. " +
-             "Percent activity calculates values as a percentage between negative and positive controls."
-    )
-    
     # Process button
     if st.button("Process Data", type="primary"):
-        if norm_method != "None" and not api_key:
-            st.error("Please configure your Claude API key to use AI-assisted normalization.")
+        if not api_key:
+            st.error("Please configure your Claude API key to use AI-assisted analysis.")
             st.stop()
         
-        # Process each file individually
-        processed_files = []
-        intermediate_files = []
+        # Initialize processed files dictionary
+        processed_files = {}
         
-        for file in uploaded_files:
-            st.markdown(f"### Processing {file.name}")
+        # Create progress bar
+        progress_bar = st.progress(0)
+        
+        # Process each file individually
+        for file_idx, file in enumerate(uploaded_files):
+            file_id = f"file_{file_idx}"
             
-            # Step 1-4: Analyze data structure and orientation
-            with st.spinner(f"Analyzing data structure in {file.name}..."):
-                df, oriented_correctly, has_labels = analyze_file_structure(file, api_key)
+            with st.expander(f"Processing {file.name}", expanded=True):
+                st.markdown(f"#### Analyzing {file.name}")
                 
-                if not has_labels:
-                    st.error(f"Could not identify data labels in {file.name}. Analysis stopped.")
-                    continue
+                # Initialize the data structure for this file
+                processed_files[file_id] = {
+                    "metadata": {
+                        "filename": file.name,
+                        "original_shape": None,
+                        "orientation": None,
+                        "header_location": None,
+                        "sample_id_location": None
+                    },
+                    "data": {
+                        "raw_df": None,
+                        "processed_df": None,
+                        "headers": [],
+                        "sample_ids": [],
+                        "controls": {
+                            "positive": {
+                                "sample_ids": [],
+                                "indices": [],
+                                "data": None
+                            },
+                            "negative": {
+                                "sample_ids": [],
+                                "indices": [],
+                                "data": None
+                            }
+                        }
+                    },
+                    "analysis_results": {
+                        "z_scores": None,
+                        "percent_activity": None
+                    }
+                }
                 
-                if not oriented_correctly:
-                    st.info(f"Data in {file.name} has been transposed - labels were found in columns.")
-                    # Save intermediate file for user reference
-                    intermediate_files.append((f"transposed_{file.name}", df))
-            
-            # Step 5: Review sample of data to glean additional information
-            with st.spinner(f"Analyzing data samples in {file.name}..."):
-                data_insights = analyze_data_sample(df, api_key)
-                if data_insights:
-                    with st.expander("Data insights"):
-                        st.write(data_insights)
-            
-            # Step 6: Identify and validate controls
-            with st.spinner(f"Identifying controls in {file.name}..."):
-                controls, control_stats = identify_and_validate_controls(df, api_key)
+                # Step 1: Read the file and store the raw data
+                file_data = process_file(file, api_key)
+                processed_files[file_id] = file_data
                 
-                if not controls or not controls.get("positive_controls") or not controls.get("negative_controls"):
-                    st.warning(f"Could not identify sufficient controls in {file.name}. Normalization may be limited.")
+                # Step 2: Display extracted information
+                st.markdown("### File Structure")
+                st.write(f"- Orientation: {file_data['metadata']['orientation']}")
+                st.write(f"- Header location: {file_data['metadata']['header_location']['type']} index {file_data['metadata']['header_location']['index']}")
+                st.write(f"- Sample ID location: {file_data['metadata']['sample_id_location']['type']} index {file_data['metadata']['sample_id_location']['index']}")
                 
-                # Display control information
-                if controls:
-                    st.write("Controls identified:")
-                    pos_count = len(controls.get("positive_controls", []))
-                    neg_count = len(controls.get("negative_controls", []))
-                    st.write(f"- Positive controls: {pos_count}")
-                    st.write(f"- Negative controls: {neg_count}")
-                    
-                    # Show control stats if available
-                    if control_stats:
-                        with st.expander("Control Statistics"):
-                            st.json(control_stats)
-            
-            # Step 7: Normalize the data
-            with st.spinner(f"Normalizing data in {file.name}..."):
-                normalized_df = normalize_data(df, norm_method, controls, control_stats)
-                processed_files.append((file.name, normalized_df, {
-                    "controls": controls,
-                    "control_stats": control_stats
-                }))
+                # Display headers
+                st.markdown("### Data Headers")
+                headers = get_headers(file_data)
+                st.write(headers)
+                
+                # Display sample IDs
+                st.markdown("### Sample IDs")
+                sample_ids = get_sample_ids(file_data)
+                st.write(sample_ids)
+                
+                # Display controls if identified
+                if file_data["data"]["controls"]["positive"]["data"] is not None:
+                    st.markdown("### Positive Controls")
+                    pos_controls = get_positive_controls(file_data)
+                    st.dataframe(pos_controls)
+                else:
+                    st.warning("No positive controls identified.")
+                
+                if file_data["data"]["controls"]["negative"]["data"] is not None:
+                    st.markdown("### Negative Controls")
+                    neg_controls = get_negative_controls(file_data)
+                    st.dataframe(neg_controls)
+                else:
+                    st.warning("No negative controls identified.")
                 
                 st.success(f"Successfully processed {file.name}")
-        
-        # Collective analysis across all files
-        if len(processed_files) > 1:
-            st.markdown("### Analyzing across all files")
             
-            # Step 1: Unify data labels
-            with st.spinner("Unifying data labels across files..."):
-                unified_labels = unify_data_labels([df for _, df, _ in processed_files])
-                st.write(f"Identified {len(unified_labels)} common data labels across files")
-            
-            # Step 2-4: Check for samples across multiple files and join if needed
-            with st.spinner("Checking for samples in multiple files..."):
-                combined_df = combine_samples_across_files(processed_files)
-                if combined_df is not None:
-                    st.success("Created combined output with samples from multiple files")
-                    processed_files.append(("combined_samples.csv", combined_df, {
-                        "is_combined": True
-                    }))
+            # Update progress
+            progress_bar.progress((file_idx + 1) / len(uploaded_files))
         
-        # Display results for download
-        st.markdown("### Results")
+        # Store in session state for use in other modules
+        st.session_state.processed_files = processed_files
         
-        # Show intermediate files if any were created
-        if intermediate_files:
-            with st.expander("Intermediate Files (Transposed Data)"):
-                for filename, df in intermediate_files:
-                    st.write(f"**{filename}**")
-                    st.dataframe(df.head())
-                    csv = df.to_csv(index=False)
-                    b64 = base64.b64encode(csv.encode()).decode()
-                    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">Download intermediate file</a>'
-                    st.markdown(href, unsafe_allow_html=True)
-        
-        # Show processed files
-        for filename, df, metadata in processed_files:
-            with st.expander(f"Processed: {filename}"):
-                st.dataframe(df.head())
-                csv = df.to_csv(index=False)
-                b64 = base64.b64encode(csv.encode()).decode()
-                processed_filename = f"normalized_{filename}"
-                href = f'<a href="data:file/csv;base64,{b64}" download="{processed_filename}">Download processed file</a>'
-                st.markdown(href, unsafe_allow_html=True)
+        # Complete
+        progress_bar.progress(100)
+        st.success("All files processed successfully!")
 
-def analyze_file_structure(file, api_key) -> Tuple[pd.DataFrame, bool, bool]:
+def process_file(file, api_key) -> Dict:
     """
-    Analyzes the structure of a CSV file to determine:
-    1. If it has data labels
-    2. If data labels are in rows or columns
+    Process an uploaded CSV file using Claude 3.7 Sonnet to identify structure and controls.
     
+    Args:
+        file: The uploaded file object
+        api_key: The Claude API key
+        
     Returns:
-    - DataFrame (possibly transposed)
-    - Whether it's already correctly oriented (True) or needed transposition (False)
-    - Whether data labels were found (True/False)
+        Dict: A dictionary with the processed file data in the specified structure
     """
-    # Reset file pointer and read file
-    file.seek(0)
-    df = pd.read_csv(file, skip_blank_lines=True)
+    # Initialize the data structure
+    file_data = {
+        "metadata": {
+            "filename": file.name,
+            "original_shape": None,
+            "orientation": None,
+            "header_location": None,
+            "sample_id_location": None
+        },
+        "data": {
+            "raw_df": None,
+            "processed_df": None,
+            "headers": [],
+            "sample_ids": [],
+            "controls": {
+                "positive": {
+                    "sample_ids": [],
+                    "indices": [],
+                    "data": None
+                },
+                "negative": {
+                    "sample_ids": [],
+                    "indices": [],
+                    "data": None
+                }
+            }
+        },
+        "analysis_results": {
+            "z_scores": None,
+            "percent_activity": None
+        }
+    }
     
-    # Create sample of first row and first column for analysis
-    first_row = df.iloc[0].tolist()
-    first_col = df.iloc[:, 0].tolist()
-    
-    # Check if the first row looks like it contains labels
-    row_has_labels = True
-    col_has_labels = True
-    
-    # Simple heuristics for initial check
-    numeric_in_first_row = sum(1 for x in first_row if isinstance(x, (int, float)) and not pd.isna(x))
-    numeric_in_first_col = sum(1 for x in first_col if isinstance(x, (int, float)) and not pd.isna(x))
-    
-    # If first row is mostly numeric, it probably doesn't contain labels
-    if numeric_in_first_row / len(first_row) > 0.5:
-        row_has_labels = False
-    
-    # If first col is mostly numeric, it probably doesn't contain labels
-    if numeric_in_first_col / len(first_col) > 0.5:
-        col_has_labels = False
-    
-    # If we have API key, ask Claude to make a judgment call
-    if api_key:
-        # Estimate token count for first row and column content
-        row_string = str(first_row)
-        col_string = str(first_col)
-        row_tokens = len(row_string.split())
-        col_tokens = len(col_string.split())
-        
-        if row_tokens > 1000 or col_tokens > 1000:
-            st.warning("Data sample is large and may exceed token limits for AI analysis.")
-            proceed = st.checkbox("Proceed with sending large data sample to AI?", value=False)
-            if not proceed:
-                # Fall back to heuristics
-                if row_has_labels:
-                    return df, True, True
-                elif col_has_labels:
-                    return df.T, False, True
-                else:
-                    return df, True, False
-        
-        client = anthropic.Anthropic(api_key=api_key)
-        
-        # Prepare sample data
-        sample_data = f"First row: {first_row}\n\nFirst column: {first_col}"
-        
-        prompt = f"""
-        I have a scientific dataset from an experimental assay. I need to determine if:
-        1. The first row contains data labels/headers
-        2. The first column contains data labels/headers
-        3. Neither contains labels (just data values)
-        
-        Here's the data:
-        {sample_data}
-        
-        In scientific assay data, labels typically contain text descriptors like "Sample", "Control", 
-        measurement names like "Concentration", "Absorbance", or sample identifiers.
-        
-        Raw data values are typically numerical, except for sample identifiers.
-        
-        Based on this data, please analyze:
-        - Does the first row look like it contains labels/headers?
-        - Does the first column look like it contains labels/headers?
-        
-        Reply with JSON only, in this format:
-        {{
-            "row_has_labels": true/false,
-            "col_has_labels": true/false,
-            "reasoning": "brief explanation"
-        }}
-        """
-        
+    # Read the file into a pandas DataFrame
+    with st.spinner("Reading file..."):
+        file.seek(0)
         try:
-            message = client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=500,
-                temperature=0,
-                system="You are an expert in scientific data analysis. Answer with JSON only.",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            response = message.content[0].text
-            
-            # Extract JSON from response
-            try:
-                json_match = re.search(r'\{.*\}', response.replace('\n', ''), re.DOTALL)
-                if json_match:
-                    result = json.loads(json_match.group(0))
-                    row_has_labels = result.get("row_has_labels", row_has_labels)
-                    col_has_labels = result.get("col_has_labels", col_has_labels)
-                    reasoning = result.get("reasoning", "")
-                    st.info(f"AI analysis: {reasoning}")
-            except:
-                st.warning("Could not parse AI response. Using heuristic analysis instead.")
-        except Exception as e:
-            st.warning(f"Could not use AI for structure analysis: {str(e)}. Using heuristic analysis instead.")
+            # Try to read with default parameters first
+            raw_df = pd.read_csv(file)
+        except:
+            # If that fails, try with more flexible parameters
+            file.seek(0)
+            raw_df = pd.read_csv(file, sep=None, engine='python')
+        
+        # Store the raw data
+        file_data["data"]["raw_df"] = raw_df
+        file_data["metadata"]["original_shape"] = raw_df.shape
     
-    # Determine if we need to transpose and if we have labels
-    if row_has_labels:
-        return df, True, True
-    elif col_has_labels:
-        return df.T, False, True
-    else:
-        return df, True, False
+    # Analyze file structure with Claude
+    with st.spinner("Analyzing file structure with Claude 3.7 Sonnet..."):
+        structure_info = analyze_file_structure(raw_df, api_key)
+        
+        # Update metadata based on analysis
+        file_data["metadata"]["orientation"] = structure_info.get("orientation", "standard")
+        file_data["metadata"]["header_location"] = structure_info.get("header_location", {"type": "row", "index": 0})
+        file_data["metadata"]["sample_id_location"] = structure_info.get("sample_id_location", {"type": "column", "index": 0})
+        
+        # Process the dataframe based on the identified structure
+        processed_df, headers, sample_ids = process_dataframe(
+            raw_df, 
+            structure_info["orientation"],
+            structure_info["header_location"],
+            structure_info["sample_id_location"]
+        )
+        
+        file_data["data"]["processed_df"] = processed_df
+        file_data["data"]["headers"] = headers
+        file_data["data"]["sample_ids"] = sample_ids
+    
+    # Identify controls with Claude
+    with st.spinner("Identifying control samples..."):
+        control_info = identify_controls(processed_df, headers, sample_ids, api_key)
+        
+        # Update control information
+        if control_info.get("positive", {}).get("sample_ids"):
+            file_data["data"]["controls"]["positive"]["sample_ids"] = control_info["positive"]["sample_ids"]
+            file_data["data"]["controls"]["positive"]["indices"] = [
+                sample_ids.index(id) for id in control_info["positive"]["sample_ids"] if id in sample_ids
+            ]
+            
+            # Extract positive control data
+            if file_data["data"]["controls"]["positive"]["indices"]:
+                pos_indices = file_data["data"]["controls"]["positive"]["indices"]
+                file_data["data"]["controls"]["positive"]["data"] = processed_df.iloc[pos_indices]
+        
+        if control_info.get("negative", {}).get("sample_ids"):
+            file_data["data"]["controls"]["negative"]["sample_ids"] = control_info["negative"]["sample_ids"]
+            file_data["data"]["controls"]["negative"]["indices"] = [
+                sample_ids.index(id) for id in control_info["negative"]["sample_ids"] if id in sample_ids
+            ]
+            
+            # Extract negative control data
+            if file_data["data"]["controls"]["negative"]["indices"]:
+                neg_indices = file_data["data"]["controls"]["negative"]["indices"]
+                file_data["data"]["controls"]["negative"]["data"] = processed_df.iloc[neg_indices]
+    
+    return file_data
 
-def analyze_data_sample(df, api_key):
+def analyze_file_structure(df, api_key) -> Dict:
     """
-    Review a sample of the data to glean additional information.
-    Returns insights as text.
+    Use Claude 3.7 Sonnet to analyze the structure of the file.
+    
+    Args:
+        df: The pandas DataFrame containing the raw data
+        api_key: The Claude API key
+        
+    Returns:
+        Dict: A dictionary with the structure information
     """
-    if not api_key:
-        return None
+    # Create sample of the data to send to Claude
+    # Limit to first 10 rows and columns to avoid token limits
+    max_rows = min(10, df.shape[0])
+    max_cols = min(10, df.shape[1])
+    
+    data_sample = df.iloc[:max_rows, :max_cols].to_string()
+    
+    # Create the client
+    client = anthropic.Anthropic(api_key=api_key)
+    
+    # Prepare the prompt
+    prompt = f"""
+    I have a scientific dataset from an experimental assay in CSV format.
+    I need to determine:
+    
+    1. If the data is in standard or transposed orientation
+        - Standard: Samples in rows, measurements in columns
+        - Transposed: Samples in columns, measurements in rows
+    
+    2. The location of data headers (describing what each measurement is)
+        - In standard orientation: Which row contains headers
+        - In transposed orientation: Which column contains headers
+    
+    3. The location of sample IDs
+        - In standard orientation: Which column contains sample IDs
+        - In transposed orientation: Which row contains sample IDs
+    
+    Here's a sample of the data:
+    ```
+    {data_sample}
+    ```
+    
+    Use your expertise in scientific data analysis to determine the file structure.
+    Return your analysis in JSON format:
+    
+    {{
+        "orientation": "standard" or "transposed",
+        "header_location": {{"type": "row" or "column", "index": integer}},
+        "sample_id_location": {{"type": "row" or "column", "index": integer}},
+        "reasoning": "brief explanation of your analysis"
+    }}
+    """
     
     try:
-        # Create a sample of the data
-        data_sample = df.head(10).to_string()
-        
-        client = anthropic.Anthropic(api_key=api_key)
-        prompt = f"""
-        I have a sample of experimental assay data. Please analyze this sample and provide insights 
-        about the data structure, potential patterns, or any information that might be relevant for analysis.
-        
-        Sample data:
-        {data_sample}
-        
-        Please provide brief insights about:
-        1. The apparent type of assay or experiment
-        2. Key variables or measurements present
-        3. Any patterns or anomalies in the data
-        4. Any other relevant observations
-        
-        Keep your response brief and focused on information that would help with data normalization.
-        """
-        
         message = client.messages.create(
             model="claude-3-7-sonnet-20250219",
-            max_tokens=500,
+            max_tokens=1000,
             temperature=0,
-            system="You are a data scientist specializing in experimental biology.",
+            system="You are an expert in scientific data analysis. Answer with JSON only.",
             messages=[
                 {"role": "user", "content": prompt}
             ]
         )
         
-        return message.content[0].text
+        response = message.content[0].text
         
+        # Extract JSON from response
+        try:
+            json_match = re.search(r'\{.*\}', response.replace('\n', ''), re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group(0))
+                st.info(f"Structure analysis: {result.get('reasoning', 'No reasoning provided')}")
+                return result
+            else:
+                st.warning("Could not parse Claude's response. Using default structure.")
+                return {
+                    "orientation": "standard",
+                    "header_location": {"type": "row", "index": 0},
+                    "sample_id_location": {"type": "column", "index": 0}
+                }
+        except json.JSONDecodeError:
+            st.warning("Invalid JSON in Claude's response. Using default structure.")
+            return {
+                "orientation": "standard",
+                "header_location": {"type": "row", "index": 0},
+                "sample_id_location": {"type": "column", "index": 0}
+            }
+            
     except Exception as e:
-        st.warning(f"Could not get data insights: {str(e)}")
-        return None
+        st.error(f"Error using Claude API: {str(e)}")
+        return {
+            "orientation": "standard",
+            "header_location": {"type": "row", "index": 0},
+            "sample_id_location": {"type": "column", "index": 0}
+        }
 
-def identify_and_validate_controls(df, api_key):
+def process_dataframe(df, orientation, header_location, sample_id_location) -> Tuple[pd.DataFrame, List[str], List[str]]:
     """
-    Identify positive and negative controls in the dataset and validate their quality.
+    Process the dataframe based on the identified structure.
+    
+    Args:
+        df: The pandas DataFrame to process
+        orientation: "standard" or "transposed"
+        header_location: Dict with "type" and "index"
+        sample_id_location: Dict with "type" and "index"
+        
+    Returns:
+        Tuple: (processed_df, headers, sample_ids)
     """
-    controls = {
-        "positive_controls": [],
-        "negative_controls": []
-    }
+    # Initialize
+    processed_df = df.copy()
+    headers = []
+    sample_ids = []
     
-    control_stats = {
-        "positive": {},
-        "negative": {}
-    }
+    # Step 1: Extract headers based on location
+    if orientation == "standard" and header_location["type"] == "row":
+        # Headers are in a row
+        header_idx = header_location["index"]
+        headers = df.iloc[header_idx].tolist()
+        
+        # If header is not the first row, reset the dataframe
+        if header_idx > 0:
+            processed_df = df.iloc[header_idx:].copy()
+            processed_df.columns = processed_df.iloc[0]
+            processed_df = processed_df.iloc[1:]
+            processed_df.reset_index(drop=True, inplace=True)
     
-    # Simple heuristic approach first
-    # Look for columns that might indicate control type
-    control_indicators = []
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if 'type' in col_lower or 'control' in col_lower or 'sample' in col_lower:
-            control_indicators.append(col)
+    elif orientation == "transposed" and header_location["type"] == "column":
+        # Headers are in a column
+        header_idx = header_location["index"]
+        headers = df.iloc[:, header_idx].tolist()
+        
+        # Transpose the dataframe so samples are in rows
+        processed_df = df.transpose()
+        
+        # If header is not the first column, handle accordingly
+        if header_idx > 0:
+            # Use the specified column as header after transposing
+            processed_df.columns = processed_df.iloc[header_idx]
+            processed_df = processed_df.iloc[1:]
+            processed_df.reset_index(drop=True, inplace=True)
     
-    # Try to find controls based on these columns
-    if control_indicators:
-        for col in control_indicators:
-            # Look for positive controls
-            pos_mask = df[col].astype(str).str.lower().str.contains('positive|pos|pos_control|high')
-            if pos_mask.any():
-                controls["positive_controls"] = df.loc[pos_mask].index.tolist()
-            
-            # Look for negative controls
-            neg_mask = df[col].astype(str).str.lower().str.contains('negative|neg|neg_control|low|blank')
-            if neg_mask.any():
-                controls["negative_controls"] = df.loc[neg_mask].index.tolist()
+    # Step 2: Extract sample IDs based on location
+    if orientation == "standard" and sample_id_location["type"] == "column":
+        # Sample IDs are in a column
+        id_idx = sample_id_location["index"]
+        sample_ids = df.iloc[:, id_idx].tolist()
+        
+        # Exclude header row if it exists
+        if header_location["type"] == "row" and header_location["index"] <= len(sample_ids) - 1:
+            sample_ids = sample_ids[header_location["index"]+1:]
     
-    # If we didn't find controls, look in any columns that might contain identifiers
-    if not controls["positive_controls"] and not controls["negative_controls"]:
-        for col in df.columns:
-            # Skip numeric columns
-            if df[col].dtype in [np.float64, np.int64]:
-                continue
-                
-            # Look for positive controls in non-numeric columns
-            pos_mask = df[col].astype(str).str.lower().str.contains('positive|pos|pos_control|high')
-            if pos_mask.any():
-                controls["positive_controls"] = df.loc[pos_mask].index.tolist()
-            
-            # Look for negative controls in non-numeric columns
-            neg_mask = df[col].astype(str).str.lower().str.contains('negative|neg|neg_control|low|blank')
-            if neg_mask.any():
-                controls["negative_controls"] = df.loc[neg_mask].index.tolist()
+    elif orientation == "transposed" and sample_id_location["type"] == "row":
+        # Sample IDs are in a row
+        id_idx = sample_id_location["index"]
+        sample_ids = df.iloc[id_idx].tolist()
+        
+        # Account for transposition
+        if header_location["type"] == "column" and header_location["index"] <= len(sample_ids) - 1:
+            sample_ids = sample_ids[header_location["index"]+1:]
     
-    # If API key is available, use Claude for more sophisticated control identification
-    if api_key and (not controls["positive_controls"] or not controls["negative_controls"]):
+    # Remove any NaN values from headers and sample_ids
+    headers = [str(h) for h in headers if not pd.isna(h)]
+    sample_ids = [str(s) for s in sample_ids if not pd.isna(s)]
+    
+    return processed_df, headers, sample_ids
+
+def identify_controls(df, headers, sample_ids, api_key) -> Dict:
+    """
+    Use Claude 3.7 Sonnet to identify positive and negative control samples.
+    
+    Args:
+        df: The processed pandas DataFrame
+        headers: List of data headers
+        sample_ids: List of sample IDs
+        api_key: The Claude API key
+        
+    Returns:
+        Dict: A dictionary with positive and negative control information
+    """
+    # Create a sample of the data and sample IDs to send to Claude
+    sample_id_str = "\n".join([f"{i}: {id}" for i, id in enumerate(sample_ids)])
+    
+    # Create a compact representation of data for Claude
+    data_sample = df.head(10).to_string()
+    
+    # Create the client
+    client = anthropic.Anthropic(api_key=api_key)
+    
+    # Prepare the prompt
+    prompt = f"""
+    I have an experimental assay dataset and need to identify the positive and negative control samples.
+    
+    Here are the sample IDs:
+    {sample_id_str}
+    
+    And here's a sample of the data:
+    ```
+    {data_sample}
+    ```
+    
+    In scientific assays, controls typically have these characteristics:
+    
+    1. Positive controls:
+       - Often labeled with terms like "positive", "pos", "pos ctrl", "high", "max", etc.
+       - Usually have higher measurement values than other samples
+       - May be standard compounds with known high activity
+    
+    2. Negative controls:
+       - Often labeled with terms like "negative", "neg", "neg ctrl", "low", "min", "blank", "buffer", etc.
+       - Usually have lower measurement values than other samples
+       - May be buffer-only or vehicle-only samples
+    
+    Please identify which samples are positive controls and which are negative controls.
+    Return your analysis in JSON format:
+    
+    {{
+        "positive": {{
+            "sample_ids": [list of sample IDs that are positive controls],
+            "reasoning": "brief explanation"
+        }},
+        "negative": {{
+            "sample_ids": [list of sample IDs that are negative controls],
+            "reasoning": "brief explanation"
+        }}
+    }}
+    """
+    
+    try:
+        message = client.messages.create(
+            model="claude-3-7-sonnet-20250219",
+            max_tokens=1000,
+            temperature=0,
+            system="You are an expert in scientific data analysis. Answer with JSON only.",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        response = message.content[0].text
+        
+        # Extract JSON from response
         try:
-            # Create sample of data to send to Claude
-            data_sample = df.to_string(max_rows=50)
-            
-            client = anthropic.Anthropic(api_key=api_key)
-            prompt = f"""
-            I have an experimental assay dataset that should include positive and negative controls.
-            
-            Here's the data:
-            {data_sample}
-            
-            Please help me identify:
-            1. Which rows are positive controls?
-            2. Which rows are negative controls?
-            
-            Look for patterns like:
-            - Rows with labels containing "positive", "pos", "negative", "neg"
-            - Rows with consistently high or low values across measurements
-            - Any standard naming patterns for controls
-            
-            Return your answer as JSON only:
-            {{
-                "positive_controls": [list of row indices or identifiers],
-                "negative_controls": [list of row indices or identifiers],
-                "reasoning": "brief explanation of how you identified controls"
-            }}
-            """
-            
-            message = client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=1000,
-                temperature=0,
-                system="You are a data scientist specializing in experimental biology. Respond with JSON only.",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            response = message.content[0].text
-            
-            # Try to extract JSON from the response
-            try:
-                json_match = re.search(r'\{.*\}', response.replace('\n', ''), re.DOTALL)
-                if json_match:
-                    ai_controls = json.loads(json_match.group(0))
-                    controls.update(ai_controls)
-                    # Remove 'reasoning' from controls dict
-                    if 'reasoning' in controls:
-                        reasoning = controls.pop('reasoning')
-                        st.info(f"Control identification reasoning: {reasoning}")
-            except Exception as json_err:
-                st.warning(f"Could not parse AI control identification: {str(json_err)}")
+            json_match = re.search(r'\{.*\}', response.replace('\n', ''), re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group(0))
                 
-        except Exception as e:
-            st.warning(f"Could not use AI for control identification: {str(e)}")
-    
-    # Now validate controls and calculate statistics
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    # Function to safely extract controls and calculate stats
-    def calculate_control_stats(control_list, df, numeric_cols):
-        stats = {}
-        
-        # Try to extract the control rows
-        if not control_list:
-            return stats
-        
-        # Extract controls either by index or by matching in the dataframe
-        try:
-            if isinstance(control_list[0], int):
-                # These are indices
-                control_df = df.iloc[control_list]
+                # Log the reasoning
+                pos_reasoning = result.get("positive", {}).get("reasoning", "No reasoning provided")
+                neg_reasoning = result.get("negative", {}).get("reasoning", "No reasoning provided")
+                
+                st.info(f"Positive controls: {pos_reasoning}")
+                st.info(f"Negative controls: {neg_reasoning}")
+                
+                return result
             else:
-                # These might be identifiers
-                # Try to match them against indices
-                try:
-                    control_df = df.loc[control_list]
-                except:
-                    # Try to match against ID-like columns
-                    for col in df.columns:
-                        if df[col].dtype not in [np.float64, np.int64]:  # Skip numeric columns
-                            matched_rows = df[df[col].isin(control_list)]
-                            if not matched_rows.empty:
-                                control_df = matched_rows
-                                break
-                    else:
-                        # No matches found
-                        return stats
+                st.warning("Could not parse Claude's response for control identification.")
+                return {"positive": {"sample_ids": []}, "negative": {"sample_ids": []}}
+        except json.JSONDecodeError:
+            st.warning("Invalid JSON in Claude's response for control identification.")
+            return {"positive": {"sample_ids": []}, "negative": {"sample_ids": []}}
             
-            # Calculate statistics for each numeric column
-            for col in numeric_cols:
-                try:
-                    values = control_df[col].astype(float)
-                    mean = values.mean()
-                    std = values.std()
-                    cv = (std / mean) * 100 if mean != 0 else float('inf')
-                    
-                    stats[col] = {
-                        "mean": float(mean),
-                        "std": float(std),
-                        "cv": float(cv),
-                        "n": len(values)
-                    }
-                except:
-                    # Skip columns that can't be processed
-                    pass
-                    
-        except Exception as e:
-            st.warning(f"Error calculating control statistics: {str(e)}")
-        
-        return stats
-    
-    # Calculate statistics for positive and negative controls
-    control_stats["positive"] = calculate_control_stats(controls["positive_controls"], df, numeric_cols)
-    control_stats["negative"] = calculate_control_stats(controls["negative_controls"], df, numeric_cols)
-    
-    # Validate controls
-    valid_controls = True
-    
-    # Check if we have both positive and negative controls
-    if not control_stats["positive"] or not control_stats["negative"]:
-        st.warning("Missing positive or negative controls")
-        valid_controls = False
-    
-    # Check CV values for each measurement
-    for col in numeric_cols:
-        if col in control_stats["positive"] and col in control_stats["negative"]:
-            pos_cv = control_stats["positive"][col].get("cv", float('inf'))
-            neg_cv = control_stats["negative"][col].get("cv", float('inf'))
-            
-            # Flag high variation in controls
-            if pos_cv > 20:
-                st.warning(f"High variation in positive controls for {col} (CV: {pos_cv:.1f}%)")
-                valid_controls = False
-                
-            if neg_cv > 20:
-                st.warning(f"High variation in negative controls for {col} (CV: {neg_cv:.1f}%)")
-                valid_controls = False
-            
-            # Check signal to background ratio
-            pos_mean = control_stats["positive"][col].get("mean", 0)
-            neg_mean = control_stats["negative"][col].get("mean", 0)
-            
-            if neg_mean != 0 and pos_mean / neg_mean < 2:
-                st.warning(f"Low signal-to-background ratio for {col} ({pos_mean/neg_mean:.2f})")
-                valid_controls = False
-    
-    return controls, control_stats
+    except Exception as e:
+        st.error(f"Error using Claude API for control identification: {str(e)}")
+        return {"positive": {"sample_ids": []}, "negative": {"sample_ids": []}}
 
-def normalize_data(df, method, controls, control_stats):
-    """
-    Apply the requested normalization method to the data.
-    """
-    if method == "None":
-        return df.copy()
-    
-    result_df = df.copy()
-    
-    # Get numeric columns
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    if method == "Z-score":
-        st.write("Applying Z-score normalization...")
-        for col in numeric_cols:
-            # Check if column has sufficient variance
-            std = df[col].std()
-            if std == 0:
-                st.warning(f"Column {col} has zero standard deviation - skipping normalization")
-                continue
-                
-            # Apply Z-score normalization
-            mean = df[col].mean()
-            result_df[col] = (df[col] - mean) / std
-    
-    elif method == "Percent activity":
-        st.write("Applying percent activity normalization...")
-        
-        # Check if we have valid control stats
-        if not control_stats or not control_stats.get("positive") or not control_stats.get("negative"):
-            st.warning("Invalid or missing control statistics. Using min/max for percent activity.")
-            
-            # Fall back to min/max normalization
-            for col in numeric_cols:
-                min_val = df[col].min()
-                max_val = df[col].max()
-                if max_val - min_val != 0:
-                    result_df[col] = ((df[col] - min_val) / (max_val - min_val)) * 100
-                else:
-                    st.warning(f"Column {col} has zero range - skipping normalization")
-        else:
-            # Use control values for normalization
-            for col in numeric_cols:
-                if col in control_stats["positive"] and col in control_stats["negative"]:
-                    pos_mean = control_stats["positive"][col].get("mean")
-                    neg_mean = control_stats["negative"][col].get("mean")
-                    
-                    if pos_mean is not None and neg_mean is not None and pos_mean - neg_mean != 0:
-                        result_df[col] = ((df[col] - neg_mean) / (pos_mean - neg_mean)) * 100
-                    else:
-                        st.warning(f"Invalid control values for {col} - skipping normalization")
-                else:
-                    st.warning(f"No control statistics for {col} - skipping normalization")
-    
-    return result_df
+# Helper functions provided in the prompt
+def get_headers(file_data):
+    """Extract just the data headers from a processed file"""
+    return file_data["data"]["headers"]
 
-def unify_data_labels(dataframes):
-    """
-    Identify common data labels across all files.
-    """
-    # Extract all column names from all dataframes
-    all_columns = []
-    for df in dataframes:
-        all_columns.extend(df.columns.tolist())
-    
-    # Count occurrences of each column
-    column_counts = {}
-    for col in all_columns:
-        if col in column_counts:
-            column_counts[col] += 1
-        else:
-            column_counts[col] = 1
-    
-    # Find columns that appear in multiple dataframes
-    common_columns = [col for col, count in column_counts.items() if count > 1]
-    
-    return common_columns
+def get_sample_ids(file_data):
+    """Extract just the sample IDs from a processed file"""
+    return file_data["data"]["sample_ids"]
 
-def combine_samples_across_files(processed_files):
-    """
-    Check if samples appear in multiple files and join them if so.
-    """
-    if len(processed_files) <= 1:
-        return None
-    
-    # Find candidate ID columns in each file
-    id_columns = {}
-    
-    for idx, (filename, df, _) in enumerate(processed_files):
-        # Try to find ID column using heuristics
-        for col in df.columns:
-            col_lower = str(col).lower()
-            if 'id' in col_lower or 'sample' in col_lower:
-                id_columns[idx] = col
-                break
-    
-    # If we couldn't find ID columns for all files, return None
-    if len(id_columns) != len(processed_files):
-        st.warning("Could not identify sample ID columns in all files. Cannot join samples.")
-        return None
-    
-    # Check for common samples
-    sample_maps = []
-    
-    for idx, (filename, df, _) in enumerate(processed_files):
-        if idx in id_columns:
-            id_col = id_columns[idx]
-            # Map sample IDs to row indices
-            sample_maps.append({
-                'file_idx': idx,
-                'id_col': id_col,
-                'samples': set(df[id_col].astype(str))
-            })
-    
-    # Find samples that appear in multiple files
-    all_samples = set()
-    for sample_map in sample_maps:
-        all_samples.update(sample_map['samples'])
-    
-    # Count occurrences of each sample
-    sample_counts = {}
-    for sample_map in sample_maps:
-        for sample in sample_map['samples']:
-            if sample in sample_counts:
-                sample_counts[sample] += 1
-            else:
-                sample_counts[sample] = 1
-    
-    # Identify samples that appear in multiple files
-    common_samples = {sample for sample, count in sample_counts.items() if count > 1}
-    
-    if not common_samples:
-        st.info("No samples found in multiple files.")
-        return None
-    
-    st.info(f"Found {len(common_samples)} samples that appear in multiple files.")
-    
-    # Join data for common samples
-    combined_data = []
-    
-    for sample in common_samples:
-        sample_data = {'Sample_ID': sample}
-        
-        for idx, (filename, df, _) in enumerate(processed_files):
-            if idx in id_columns:
-                id_col = id_columns[idx]
-                
-                # Find rows with this sample
-                matching_rows = df[df[id_col].astype(str) == sample]
-                
-                if not matching_rows.empty:
-                    # Get first matching row
-                    row = matching_rows.iloc[0]
-                    
-                    # Add all columns except ID column
-                    for col in df.columns:
-                        if col != id_col:
-                            # Use original column name if unique, otherwise add file identifier
-                            col_name = col if col not in sample_data else f"{col}_{filename}"
-                            sample_data[col_name] = row[col]
-        
-        combined_data.append(sample_data)
-    
-    # Create combined dataframe
-    combined_df = pd.DataFrame(combined_data)
-    
-    return combined_df
+def get_positive_controls(file_data):
+    """Extract positive control data with headers"""
+    return file_data["data"]["controls"]["positive"]["data"]
+
+def get_negative_controls(file_data):
+    """Extract negative control data with headers"""
+    return file_data["data"]["controls"]["negative"]["data"]
 
 if __name__ == "__main__":
     main()
