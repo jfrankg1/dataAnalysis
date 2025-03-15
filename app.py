@@ -430,6 +430,9 @@ def process_dataframe(df, orientation, header_location, sample_id_location) -> T
         header_idx = header_location["index"]
         headers = df.iloc[header_idx].tolist()
         
+        # Filter out NaN values from headers
+        headers = [str(h) for h in headers if not pd.isna(h)]
+        
         # If header is not the first row, reset the dataframe
         if header_idx > 0:
             processed_df = df.iloc[header_idx:].copy()
@@ -441,6 +444,9 @@ def process_dataframe(df, orientation, header_location, sample_id_location) -> T
         # Headers are in a column
         header_idx = header_location["index"]
         headers = df.iloc[:, header_idx].tolist()
+        
+        # Filter out NaN values from headers
+        headers = [str(h) for h in headers if not pd.isna(h)]
         
         # Transpose the dataframe so samples are in rows
         processed_df = df.transpose()
@@ -458,6 +464,9 @@ def process_dataframe(df, orientation, header_location, sample_id_location) -> T
         id_idx = sample_id_location["index"]
         sample_ids = df.iloc[:, id_idx].tolist()
         
+        # Filter out NaN values from sample IDs
+        sample_ids = [str(s) for s in sample_ids if not pd.isna(s)]
+        
         # Exclude header row if it exists
         if header_location["type"] == "row" and header_location["index"] <= len(sample_ids) - 1:
             sample_ids = sample_ids[header_location["index"]+1:]
@@ -467,13 +476,12 @@ def process_dataframe(df, orientation, header_location, sample_id_location) -> T
         id_idx = sample_id_location["index"]
         sample_ids = df.iloc[id_idx].tolist()
         
+        # Filter out NaN values from sample IDs
+        sample_ids = [str(s) for s in sample_ids if not pd.isna(s)]
+        
         # Account for transposition
         if header_location["type"] == "column" and header_location["index"] <= len(sample_ids) - 1:
             sample_ids = sample_ids[header_location["index"]+1:]
-    
-    # Remove any NaN values from headers and sample_ids
-    headers = [str(h) for h in headers if not pd.isna(h)]
-    sample_ids = [str(s) for s in sample_ids if not pd.isna(s)]
     
     return processed_df, headers, sample_ids
 
