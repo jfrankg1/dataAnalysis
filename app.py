@@ -307,7 +307,7 @@ with st.spinner("Identifying control samples..."):
         except Exception as e:
             st.warning(f"Error extracting negative control data: {e}")
     
-    return file_data
+return file_data
 
 def analyze_file_structure(df, api_key) -> Dict:
     """
