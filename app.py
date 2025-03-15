@@ -242,31 +242,70 @@ def process_file(file, api_key) -> Dict:
         file_data["data"]["sample_ids"] = sample_ids
     
     # Identify controls with Claude
-    with st.spinner("Identifying control samples..."):
-        control_info = identify_controls(processed_df, headers, sample_ids, api_key)
+with st.spinner("Identifying control samples..."):
+    control_info = identify_controls(processed_df, headers, sample_ids, api_key)
+    
+    # Process positive controls
+    if control_info.get("positive", {}).get("sample_ids"):
+        # Save the original sample IDs from Claude
+        all_pos_ids = control_info["positive"]["sample_ids"]
         
-        # Update control information
-        if control_info.get("positive", {}).get("sample_ids"):
-            file_data["data"]["controls"]["positive"]["sample_ids"] = control_info["positive"]["sample_ids"]
-            file_data["data"]["controls"]["positive"]["indices"] = [
-                sample_ids.index(id) for id in control_info["positive"]["sample_ids"] if id in sample_ids
-            ]
+        # Filter out any non-string values or NaN values
+        valid_pos_ids = []
+        for id in all_pos_ids:
+            if id is None or pd.isna(id):
+                continue
+            valid_pos_ids.append(str(id))
+        
+        # Only keep IDs that exist in sample_ids
+        valid_pos_ids = [id for id in valid_pos_ids if id in sample_ids]
+        
+        # Store valid IDs
+        file_data["data"]["controls"]["positive"]["sample_ids"] = valid_pos_ids
+        
+        # Safely convert to indices
+        try:
+            pos_indices = [sample_ids.index(id) for id in valid_pos_ids]
+            file_data["data"]["controls"]["positive"]["indices"] = pos_indices
             
-            # Extract positive control data
-            if file_data["data"]["controls"]["positive"]["indices"]:
-                pos_indices = file_data["data"]["controls"]["positive"]["indices"]
+            # Extract positive control data only if we have valid indices
+            if pos_indices:
                 file_data["data"]["controls"]["positive"]["data"] = processed_df.iloc[pos_indices]
+            else:
+                st.warning("No valid positive control indices found after filtering")
+        except Exception as e:
+            st.warning(f"Error extracting positive control data: {e}")
+    
+    # Process negative controls
+    if control_info.get("negative", {}).get("sample_ids"):
+        # Save the original sample IDs from Claude
+        all_neg_ids = control_info["negative"]["sample_ids"]
         
-        if control_info.get("negative", {}).get("sample_ids"):
-            file_data["data"]["controls"]["negative"]["sample_ids"] = control_info["negative"]["sample_ids"]
-            file_data["data"]["controls"]["negative"]["indices"] = [
-                sample_ids.index(id) for id in control_info["negative"]["sample_ids"] if id in sample_ids
-            ]
+        # Filter out any non-string values or NaN values
+        valid_neg_ids = []
+        for id in all_neg_ids:
+            if id is None or pd.isna(id):
+                continue
+            valid_neg_ids.append(str(id))
+        
+        # Only keep IDs that exist in sample_ids
+        valid_neg_ids = [id for id in valid_neg_ids if id in sample_ids]
+        
+        # Store valid IDs
+        file_data["data"]["controls"]["negative"]["sample_ids"] = valid_neg_ids
+        
+        # Safely convert to indices
+        try:
+            neg_indices = [sample_ids.index(id) for id in valid_neg_ids]
+            file_data["data"]["controls"]["negative"]["indices"] = neg_indices
             
-            # Extract negative control data
-            if file_data["data"]["controls"]["negative"]["indices"]:
-                neg_indices = file_data["data"]["controls"]["negative"]["indices"]
+            # Extract negative control data only if we have valid indices
+            if neg_indices:
                 file_data["data"]["controls"]["negative"]["data"] = processed_df.iloc[neg_indices]
+            else:
+                st.warning("No valid negative control indices found after filtering")
+        except Exception as e:
+            st.warning(f"Error extracting negative control data: {e}")
     
     return file_data
 
