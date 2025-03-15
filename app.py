@@ -441,6 +441,7 @@ def process_dataframe(df, orientation, header_location, sample_id_location) -> T
 def identify_controls(df, headers, sample_ids, api_key) -> Dict:
     """
     Use Claude 3.7 Sonnet to identify positive and negative control samples.
+    Analyzes the entire dataset for more accurate control identification.
     
     Args:
         df: The processed pandas DataFrame
@@ -451,11 +452,118 @@ def identify_controls(df, headers, sample_ids, api_key) -> Dict:
     Returns:
         Dict: A dictionary with positive and negative control information
     """
-    # Create a sample of the data and sample IDs to send to Claude
+    # Create a comprehensive data representation for Claude
     sample_id_str = "\n".join([f"{i}: {id}" for i, id in enumerate(sample_ids)])
     
-    # Create a compact representation of data for Claude
-    data_sample = df.head(10).to_string()
+    # Get the shape of the dataframe
+    rows, cols = df.shape
+    
+    # Create a token-efficient but thorough data representation
+    data_info = []
+    data_info.append(f"Dataset has {rows} rows and {cols} columns.")
+    data_info.append(f"Headers: {headers}")
+    
+    # Get numeric columns for analysis
+    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    
+    # Add statistical summary for better context
+    if numeric_cols:
+        data_info.append("\nStatistical summary of numeric columns:")
+        stats = df[numeric_cols].describe().to_string()
+        data_info.append(stats)
+    
+    # Include the entire dataset, handling large datasets appropriately
+    if rows > 100:
+        # For large datasets, include full sample ID list but sample the data
+        data_info.append(f"\nFull data (first 20 rows shown as sample):")
+        data_info.append(df.head(20).to_string())
+        # Add a sample from the middle and end
+        if rows > 50:
+            middle_idx = rows // 2
+            data_info.append(f"\nData from middle of dataset (rows {middle_idx}-{middle_idx+4}):")
+            data_info.append(df.iloc[middle_idx:middle_idx+5].to_string())
+            data_info.append(f"\nData from end of dataset (last 5 rows):")
+            data_info.append(df.tail(5).to_string())
+    else:
+        # For smaller datasets, include the entire dataset
+        data_info.append("\nFull dataset:")
+        data_info.append(df.to_string())
+    
+    # Check for patterns in sample IDs that might indicate controls
+    sample_id_patterns = "\nSample ID analysis:"
+    pos_patterns = ["positive", "pos", "high", "max", "+", "pos_ctrl", "pos ctrl"]
+    neg_patterns = ["negative", "neg", "low", "min", "-", "blank", "buffer", "neg_ctrl", "neg ctrl"]
+    
+    potential_pos = []
+    potential_neg = []
+    
+    for i, sample_id in enumerate(sample_ids):
+        sid_lower = str(sample_id).lower()
+        
+        is_pos = any(pattern in sid_lower for pattern in pos_patterns)
+        is_neg = any(pattern in sid_lower for pattern in neg_patterns)
+        
+        if is_pos:
+            potential_pos.append(i)
+        if is_neg:
+            potential_neg.append(i)
+    
+    if potential_pos:
+        sample_id_patterns += f"\nPotential positive controls based on names: {[sample_ids[i] for i in potential_pos]}"
+        # Include data values for these potential controls
+        for i in potential_pos:
+            if i < len(df) and i < rows:
+                row_data = df.iloc[i]
+                sample_id_patterns += f"\n{sample_ids[i]} values: "
+                for col in numeric_cols[:5]:  # Limit columns to save tokens
+                    if col in df.columns:
+                        val = row_data[col]
+                        sample_id_patterns += f"{col}={val}, "
+    
+    if potential_neg:
+        sample_id_patterns += f"\nPotential negative controls based on names: {[sample_ids[i] for i in potential_neg]}"
+        # Include data values for these potential controls
+        for i in potential_neg:
+            if i < len(df) and i < rows:
+                row_data = df.iloc[i]
+                sample_id_patterns += f"\n{sample_ids[i]} values: "
+                for col in numeric_cols[:5]:  # Limit columns to save tokens
+                    if col in df.columns:
+                        val = row_data[col]
+                        sample_id_patterns += f"{col}={val}, "
+    
+    data_info.append(sample_id_patterns)
+    
+    # Look for extreme values that might indicate controls
+    if numeric_cols:
+        extreme_values = "\nRows with extreme values that might be controls:"
+        
+        for col in numeric_cols[:5]:  # Limit to first 5 numeric columns to save tokens
+            if col in df.columns:
+                # Find rows with max values
+                max_indices = df[col].nlargest(3).index.tolist()
+                extreme_values += f"\nHighest {col} values: "
+                for idx in max_indices:
+                    if idx < len(sample_ids):
+                        sample_name = sample_ids[idx] if idx < len(sample_ids) else f"Row {idx}"
+                        extreme_values += f"{sample_name}={df.iloc[idx][col]}, "
+                
+                # Find rows with min values
+                min_indices = df[col].nsmallest(3).index.tolist()
+                extreme_values += f"\nLowest {col} values: "
+                for idx in min_indices:
+                    if idx < len(sample_ids):
+                        sample_name = sample_ids[idx] if idx < len(sample_ids) else f"Row {idx}"
+                        extreme_values += f"{sample_name}={df.iloc[idx][col]}, "
+        
+        data_info.append(extreme_values)
+    
+    # Join all data information
+    data_summary = "\n".join(data_info)
+    
+    # Show warning for large datasets
+    if rows * cols > 5000:
+        st.warning("Analyzing a large dataset. This might take longer than usual.")
     
     # Create the client
     client = anthropic.Anthropic(api_key=api_key)
@@ -467,9 +575,9 @@ def identify_controls(df, headers, sample_ids, api_key) -> Dict:
     Here are the sample IDs:
     {sample_id_str}
     
-    And here's a sample of the data:
+    And here's comprehensive information about the dataset:
     ```
-    {data_sample}
+    {data_summary}
     ```
     
     In scientific assays, controls typically have these characteristics:
@@ -484,7 +592,9 @@ def identify_controls(df, headers, sample_ids, api_key) -> Dict:
        - Usually have lower measurement values than other samples
        - May be buffer-only or vehicle-only samples
     
-    Please identify which samples are positive controls and which are negative controls.
+    Based on the COMPLETE dataset information I've provided (including patterns in names, extreme values, 
+    and statistical distributions), identify which samples are positive and negative controls.
+    
     Return your analysis in JSON format:
     
     {{
