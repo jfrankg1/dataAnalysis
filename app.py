@@ -41,7 +41,7 @@ def main():
         st.info("An Anthropic API key is required to extract protocol information using Claude")
         api_key = st.text_input("Enter your Anthropic API Key", type="password")
         model = st.selectbox("Select Claude Model", 
-                            ["claude-3-sonnet-20240229", 
+                            ["claude-3-7-sonnet-20250219", 
                              "claude-3-opus-20240229",
                              "claude-3-haiku-20240307"])
     
